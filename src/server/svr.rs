@@ -40,13 +40,13 @@ struct AppStateLoadItem {
 }
 
 impl AppState {
-    pub fn new(pathes: Vec<String>) -> std::io::Result<Self> {
+    pub fn new(pathes: Vec<String>, no_checksum: bool) -> std::io::Result<Self> {
         let mut vfs = Box::new(fs::VirtualFileSystem::new());
         let path_buffers = pathes.into_iter().map(PathBuf::from).collect::<Vec<_>>();
         for p in path_buffers.iter() {
             vfs.add(p.clone())?;
         }
-        vfs.seal()?;
+        vfs.seal_with_options(no_checksum)?;
         vfs.dump_md5(stderr())?;
         Ok(Self {
             vfs: RwLock::new(vfs),
@@ -141,7 +141,7 @@ fn build_app(app_state: Arc<AppState>) -> Router {
 }
 
 pub enum CreateArgs {
-    Pathes(Vec<String>),
+    Pathes { pathes: Vec<String>, no_checksum: bool },
     LoadPath(String),
 }
 
@@ -153,7 +153,7 @@ pub async fn startup(
     tracker: Vec<String>,
 ) -> std::io::Result<()> {
     let app_state = Arc::new(match args {
-        CreateArgs::Pathes(pathes) => AppState::new(pathes)?,
+        CreateArgs::Pathes { pathes, no_checksum } => AppState::new(pathes, no_checksum)?,
         CreateArgs::LoadPath(path) => AppState::load_from_binary(path)?,
     });
     if let Some(dump_path) = dump_path {

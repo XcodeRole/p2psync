@@ -135,6 +135,10 @@ impl VirtualFileSystem {
     }
 
     pub fn seal(&mut self) -> io::Result<()> {
+        self.seal_with_options(false)
+    }
+
+    pub fn seal_with_options(&mut self, no_checksum: bool) -> io::Result<()> {
         if !self.md5_to_id.is_empty() {
             return Result::Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -155,29 +159,35 @@ impl VirtualFileSystem {
                 match &item.special_fields {
                     SpecialField::Dir { .. } => Ok(()),
                     SpecialField::File { .. } => {
-                        let mut buffer = vec![0u8; BUFFER_SIZE];
-                        let mut file = std::fs::File::open(item.path.as_path())?;
                         let file_size = fs::metadata(item.path.as_path())?.size();
-                        let begin = SystemTime::now();
-                        let mut ctx = md5::Context::new();
-                        loop {
-                            let n = file.read(&mut buffer)?;
-                            if n == 0 {
-                                break;
+
+                        if no_checksum {
+                            // Use full path string as the key directly (no file IO needed)
+                            item.md5 = item.path.to_string_lossy().to_string();
+                        } else {
+                            let mut buffer = vec![0u8; BUFFER_SIZE];
+                            let mut file = std::fs::File::open(item.path.as_path())?;
+                            let begin = SystemTime::now();
+                            let mut ctx = md5::Context::new();
+                            loop {
+                                let n = file.read(&mut buffer)?;
+                                if n == 0 {
+                                    break;
+                                }
+                                ctx.consume(&buffer[..n]);
                             }
-                            ctx.consume(&buffer[..n]);
-                        }
-                        let end = SystemTime::now();
-                        let duration = end.duration_since(begin).unwrap();
-                        if duration > Duration::from_millis(100) {
-                            println!(
-                                "file {:?} read took {:.2} seconds",
-                                item.path.file_name().unwrap(),
-                                duration.as_millis() as f64 / 1000.0
-                            );
+                            let end = SystemTime::now();
+                            let duration = end.duration_since(begin).unwrap();
+                            if duration > Duration::from_millis(100) {
+                                println!(
+                                    "file {:?} read took {:.2} seconds",
+                                    item.path.file_name().unwrap(),
+                                    duration.as_millis() as f64 / 1000.0
+                                );
+                            }
+                            item.md5 = format!("{:x}", ctx.compute());
                         }
 
-                        item.md5 = format!("{:x}", ctx.compute());
                         item.special_fields = SpecialField::File {
                             size: file_size as usize,
                         };
@@ -195,13 +205,18 @@ impl VirtualFileSystem {
                     let mut mut_children = children.clone();
                     mut_children.sort_by(|a, b| self.items[*a].md5.cmp(&self.items[*b].md5));
 
-                    let mut md5_ctx = md5::Context::new();
-                    for child in mut_children.iter() {
-                        md5_ctx.consume(&self.items[*child].md5);
-                    }
-                    let md5 = format!("{:x}", md5_ctx.compute());
+                    let dir_md5 = if no_checksum {
+                        // Use full path string as the key for dirs too
+                        item.path.to_string_lossy().to_string()
+                    } else {
+                        let mut md5_ctx = md5::Context::new();
+                        for child in mut_children.iter() {
+                            md5_ctx.consume(&self.items[*child].md5);
+                        }
+                        format!("{:x}", md5_ctx.compute())
+                    };
 
-                    Some((mut_children, md5))
+                    Some((mut_children, dir_md5))
                 } else {
                     None
                 }

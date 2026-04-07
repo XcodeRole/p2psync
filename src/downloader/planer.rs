@@ -76,9 +76,10 @@ impl Planer {
             let mut errs = Vec::new();
             let mut tree_and_peer = Vec::new();
             for (peer, result) in peers.iter().map(|peer| {
+                let encoded_md5 = urlencoding::encode(md5);
                 (
                     peer.as_str(),
-                    reqwest::get(format!("{}/query?md5={}", peer.as_str(), md5)),
+                    reqwest::get(format!("{}/query?md5={}", peer.as_str(), encoded_md5)),
                 )
             }) {
                 match result

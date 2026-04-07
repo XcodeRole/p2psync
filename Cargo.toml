@@ -28,6 +28,7 @@ serde-binary = "0.5.0"
 tokio-context = "0.1.3"
 reqwest = { version = "0.12.23", features = ["json"] }
 futures = "0.3.31"
+urlencoding = "2.1"
 
 [dev-dependencies]
 tempfile = "3.0"

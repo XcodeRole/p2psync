@@ -37,14 +37,18 @@ enum Commands {
         load_path: Option<String>,
         #[arg(short, long, help = "tracker address")]
         tracker: Vec<String>,
+        #[arg(long, help = "Skip MD5 checksum, use file path as key instead", default_value_t = false)]
+        no_checksum: bool,
     },
     Download {
-        #[arg(short, long, help = "md5")]
+        #[arg(short, long, help = "md5 or path-based identifier")]
         md5: String,
         #[arg(short, long, help = "concurrency", default_value_t = 10)]
         concurrency: usize,
         #[arg(short, long, help = "tracker address")]
         tracker: Vec<String>,
+        #[arg(long, help = "Skip MD5 verification after download", default_value_t = false)]
+        no_checksum: bool,
     },
 }
 
@@ -65,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             dump_path,
             load_path,
             tracker,
+            no_checksum,
         }) => {
             startup(
                 if path.is_empty() {
@@ -75,7 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         }
                     }
                 } else {
-                    CreateArgs::Pathes(path)
+                    CreateArgs::Pathes { pathes: path, no_checksum }
                 },
                 address,
                 port,
@@ -89,8 +94,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             md5,
             concurrency,
             tracker,
+            no_checksum,
         }) => {
-            if let Err(err) = download(md5, concurrency, tracker).await {
+            if let Err(err) = download(md5, concurrency, tracker, no_checksum).await {
                 eprintln!("download: {}", err);
                 panic!("download failed");
             }

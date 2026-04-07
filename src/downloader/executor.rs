@@ -21,7 +21,9 @@ impl<'a> Iterator for DownloadURLs<'a> {
         } else {
             let offset = (self.peer_id + self.cur) % self.peers.len();
             self.cur += 1;
-            Some(format!("{}/download?md5={}", self.peers[offset], self.md5))
+            // URL-encode the md5/key value to handle paths with special characters
+            let encoded_key = urlencoding::encode(self.md5);
+            Some(format!("{}/download?md5={}", self.peers[offset], encoded_key))
         }
     }
 }
@@ -32,10 +34,11 @@ async fn download_and_check(
     md5: &str,
     file_path: &Path,
     pbar: Arc<Mutex<tqdm::Tqdm<()>>>,
+    no_checksum: bool,
 ) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
     let mut resp = client.get(url).send().await?;
     let mut output_file = fs::File::create(file_path).await?;
-    let mut md5_context = md5::Context::new();
+    let mut md5_context = if no_checksum { None } else { Some(md5::Context::new()) };
 
     // Use larger buffer for better performance
     const BUFFER_SIZE: usize = 4 * 1024 * 1024; // 4MB buffer
@@ -44,7 +47,9 @@ async fn download_and_check(
     while let Some(chunk) = resp.chunk().await? {
         // Add chunk to buffer
         buffer.extend_from_slice(&chunk);
-        md5_context.consume(&chunk);
+        if let Some(ref mut ctx) = md5_context {
+            ctx.consume(&chunk);
+        }
 
         pbar.lock().unwrap().update(chunk.len())?;
         // Write buffer to file when it's large enough
@@ -62,17 +67,20 @@ async fn download_and_check(
     // Ensure all data is written to disk
     output_file.flush().await?;
 
-    if md5 != format!("{:x}", md5_context.compute()) {
-        Err("md5 mismatch".into())
-    } else {
-        Ok(())
+    if let Some(ctx) = md5_context {
+        if md5 != format!("{:x}", ctx.compute()) {
+            return Err("md5 mismatch".into());
+        }
     }
+
+    Ok(())
 }
 
 async fn execute_action(
     action: Action,
     pbar: Arc<Mutex<tqdm::Tqdm<()>>>,
     client: Arc<Client>,
+    no_checksum: bool,
 ) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
     Ok(match action {
         Action::Download {
@@ -109,6 +117,7 @@ async fn execute_action(
                     &md5,
                     file_path.as_path(),
                     pbar.clone(),
+                    no_checksum,
                 )
                 .await
                 {
@@ -140,6 +149,7 @@ fn total_size(actions: &Vec<Action>) -> usize {
 pub async fn execute_actions(
     actions: &Vec<Action>,
     concurrency: usize,
+    no_checksum: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create optimized reqwest client with larger buffers and better performance settings
     let client = Client::builder()
@@ -163,10 +173,12 @@ pub async fn execute_actions(
         tqdm::pbar(Some(total_size(actions))).desc(Some("download")),
     ));
     for action in actions {
+        let no_checksum = no_checksum;
         handles.push_back(tokio::spawn(execute_action(
             action.clone(),
             tqdm.clone(),
             client.clone(),
+            no_checksum,
         )));
 
         if handles.len() > concurrency {
