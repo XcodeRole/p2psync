@@ -79,7 +79,8 @@ fn resolve_symlink(path: PathBuf) -> io::Result<PathBuf> {
     }
 }
 
-const BUFFER_SIZE: usize = 4096;
+const BUFFER_SIZE: usize = 8 * 1024 * 1024; // 8MB buffer for better IO throughput on large files
+const MAX_IO_PARALLELISM: usize = 16; // Limit parallel IO to avoid cephfs bandwidth contention
 
 impl VirtualFileSystem {
     pub fn new() -> Self {
@@ -141,13 +142,20 @@ impl VirtualFileSystem {
             ));
         }
 
-        (&mut self.items)
-            .into_par_iter()
-            .try_for_each(|item| -> io::Result<()> {
+        // Use a custom thread pool with limited parallelism to avoid IO contention on cephfs
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(MAX_IO_PARALLELISM)
+            .build()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+
+        pool.install(|| {
+            (&mut self.items)
+                .into_par_iter()
+                .try_for_each(|item| -> io::Result<()> {
                 match &item.special_fields {
                     SpecialField::Dir { .. } => Ok(()),
                     SpecialField::File { .. } => {
-                        let mut buffer = [0; BUFFER_SIZE];
+                        let mut buffer = vec![0u8; BUFFER_SIZE];
                         let mut file = std::fs::File::open(item.path.as_path())?;
                         let file_size = fs::metadata(item.path.as_path())?.size();
                         let begin = SystemTime::now();
@@ -176,7 +184,8 @@ impl VirtualFileSystem {
                         Ok(())
                     }
                 }
-            })?;
+            })
+        })?;
 
         for index in 0..self.items.len() {
             if let Some((new_children, new_md5)) = {
