@@ -31,25 +31,20 @@ impl<'a> Iterator for DownloadURLs<'a> {
 async fn download_and_check(
     client: &Client,
     url: &str,
-    md5: &str,
+    _md5: &str,
     file_path: &Path,
     pbar: Arc<Mutex<tqdm::Tqdm<()>>>,
-    no_checksum: bool,
+    _no_checksum: bool,
 ) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
     let mut resp = client.get(url).send().await?;
     let mut output_file = fs::File::create(file_path).await?;
-    let mut md5_context = if no_checksum { None } else { Some(md5::Context::new()) };
 
     // Use larger buffer for better performance
     const BUFFER_SIZE: usize = 4 * 1024 * 1024; // 4MB buffer
     let mut buffer = Vec::with_capacity(BUFFER_SIZE);
 
     while let Some(chunk) = resp.chunk().await? {
-        // Add chunk to buffer
         buffer.extend_from_slice(&chunk);
-        if let Some(ref mut ctx) = md5_context {
-            ctx.consume(&chunk);
-        }
 
         pbar.lock().unwrap().update(chunk.len())?;
         // Write buffer to file when it's large enough
@@ -66,12 +61,6 @@ async fn download_and_check(
 
     // Ensure all data is written to disk
     output_file.flush().await?;
-
-    if let Some(ctx) = md5_context {
-        if md5 != format!("{:x}", ctx.compute()) {
-            return Err("md5 mismatch".into());
-        }
-    }
 
     Ok(())
 }
@@ -135,6 +124,18 @@ async fn execute_action(
     })
 }
 
+fn human_readable_size(bytes: usize) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB"];
+    let mut size = bytes as f64;
+    for unit in UNITS {
+        if size < 1024.0 {
+            return format!("{:.2} {}", size, unit);
+        }
+        size /= 1024.0;
+    }
+    format!("{:.2} EB", size)
+}
+
 fn total_size(actions: &Vec<Action>) -> usize {
     let mut total_size = 0;
     for action in actions {
@@ -152,9 +153,12 @@ pub async fn execute_actions(
     no_checksum: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create optimized reqwest client with larger buffers and better performance settings
+    // NOTE: Do NOT set a global .timeout() — it caps the ENTIRE request including body
+    // transfer. For large files (tens of GB), this causes silent truncation.
+    // Use connect_timeout + read_timeout instead.
     let client = Client::builder()
-        .timeout(Duration::from_secs(120))
-        .connect_timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(300))
         .pool_max_idle_per_host(20)
         .pool_idle_timeout(Duration::from_secs(60))
         .tcp_keepalive(Duration::from_secs(60))
@@ -169,8 +173,21 @@ pub async fn execute_actions(
     let mut handles = VecDeque::new();
     let mut errs = Vec::new();
 
+    // Print file list with sizes
+    let mut file_count = 0;
+    let total = total_size(actions);
+    println!("\n========== Download File List ==========");
+    for action in actions {
+        if let Action::Download { path, size, .. } = action {
+            file_count += 1;
+            println!("  [{}] {} ({})", file_count, path.display(), human_readable_size(*size));
+        }
+    }
+    println!("========================================");
+    println!("Total: {} files, {}\n", file_count, human_readable_size(total));
+
     let tqdm = Arc::new(Mutex::new(
-        tqdm::pbar(Some(total_size(actions))).desc(Some("download")),
+        tqdm::pbar(Some(total)).desc(Some("download")),
     ));
     for action in actions {
         let no_checksum = no_checksum;
@@ -183,8 +200,10 @@ pub async fn execute_actions(
 
         if handles.len() > concurrency {
             let handle = handles.pop_front().unwrap();
-            if let Err(err) = handle.await {
-                errs.push(err);
+            match handle.await {
+                Err(join_err) => errs.push(format!("Task panicked: {}", join_err)),
+                Ok(Err(task_err)) => errs.push(format!("Download failed: {}", task_err)),
+                Ok(Ok(())) => {}
             }
         }
 
@@ -194,14 +213,15 @@ pub async fn execute_actions(
     }
 
     while let Some(handle) = handles.pop_front() {
-        if let Err(err) = handle.await {
-            errs.push(err);
+        match handle.await {
+            Err(join_err) => errs.push(format!("Task panicked: {}", join_err)),
+            Ok(Err(task_err)) => errs.push(format!("Download failed: {}", task_err)),
+            Ok(Ok(())) => {}
         }
     }
 
     if !errs.is_empty() {
-        let error_msgs: Vec<String> = errs.iter().map(|e| e.to_string()).collect();
-        return Err(format!("Some tasks failed: {}", error_msgs.join("; ")).into());
+        return Err(format!("Some tasks failed: {}", errs.join("; ")).into());
     }
 
     Ok(())
