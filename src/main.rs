@@ -39,6 +39,8 @@ enum Commands {
         tracker: Vec<String>,
         #[arg(long, help = "Skip MD5 checksum, use file path as key instead", default_value_t = false)]
         no_checksum: bool,
+        #[arg(long, help = "Write manifest file (filename key size) to this path")]
+        manifest_out: Option<String>,
     },
     Download {
         #[arg(short, long, help = "md5 or path-based identifier")]
@@ -49,6 +51,8 @@ enum Commands {
         tracker: Vec<String>,
         #[arg(long, help = "Skip MD5 verification after download", default_value_t = false)]
         no_checksum: bool,
+        #[arg(long, help = "Resume partial downloads instead of overwriting", default_value_t = false)]
+        resume: bool,
     },
 }
 
@@ -70,6 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             load_path,
             tracker,
             no_checksum,
+            manifest_out,
         }) => {
             startup(
                 if path.is_empty() {
@@ -80,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         }
                     }
                 } else {
-                    CreateArgs::Pathes { pathes: path, no_checksum }
+                    CreateArgs::Pathes { pathes: path, no_checksum, manifest_out }
                 },
                 address,
                 port,
@@ -95,8 +100,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             concurrency,
             tracker,
             no_checksum,
+            resume,
         }) => {
-            if let Err(err) = download(md5, concurrency, tracker, no_checksum).await {
+            if let Err(err) = download(md5, concurrency, tracker, no_checksum, resume).await {
                 eprintln!("download: {}", err);
                 panic!("download failed");
             }

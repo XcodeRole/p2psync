@@ -249,7 +249,14 @@ impl VirtualFileSystem {
         let mut children = Vec::new();
 
         for entry in std::fs::read_dir(path.as_path())? {
-            children.push(self.add(entry?.path())?);
+            let entry = entry?;
+            // Skip hidden files/directories (names starting with '.')
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with('.') {
+                    continue;
+                }
+            }
+            children.push(self.add(entry.path())?);
         }
 
         self.items.push(FileOrDir {
@@ -282,16 +289,34 @@ impl VirtualFileSystem {
 
     pub fn dump_md5<W: Write>(&self, mut w: W) -> io::Result<()> {
         for item in self.items.iter() {
-            write!(
-                w,
-                "{} {}: md5 {}\n",
-                match item.special_fields {
-                    SpecialField::Dir { .. } => "dir",
-                    SpecialField::File { .. } => "file",
-                },
-                item.path.display(),
-                item.md5
-            )?;
+            match &item.special_fields {
+                SpecialField::Dir { .. } => {
+                    write!(w, "dir {}: md5 {}\n", item.path.display(), item.md5)?;
+                }
+                SpecialField::File { size } => {
+                    write!(
+                        w,
+                        "file {}: md5 {} size {}\n",
+                        item.path.display(),
+                        item.md5,
+                        size
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Write a manifest file with tab-separated format: "<full_path>\t<key>\t<size_in_bytes>" per line.
+    /// Only includes leaf files (not directories). The key is the md5/path-based identifier.
+    /// Tab separator is used to safely handle filenames containing spaces.
+    pub fn write_manifest<W: Write>(&self, mut w: W) -> io::Result<()> {
+        for item in self.items.iter() {
+            if let SpecialField::File { size } = &item.special_fields {
+                // Use full path for both display and identification
+                let full_path = item.path.to_string_lossy();
+                write!(w, "{}\t{}\t{}\n", full_path, item.md5, size)?;
+            }
         }
         Ok(())
     }
