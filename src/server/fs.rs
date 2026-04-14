@@ -73,7 +73,10 @@ pub struct VirtualFileSystem {
 
 fn resolve_symlink(path: PathBuf) -> io::Result<PathBuf> {
     if path.is_symlink() {
-        std::fs::read_link(path)
+        // Use canonicalize to resolve symlinks properly, including relative targets.
+        // read_link returns the raw target which may be relative, causing is_dir/is_file
+        // to fail when resolved against the wrong working directory.
+        path.canonicalize()
     } else {
         Ok(path)
     }
